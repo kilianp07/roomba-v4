@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Native
+native/mqtt_bridge
+
+# Credentials
+.env
+.envrc
+
+# IDE
+.vscode/
+.idea/

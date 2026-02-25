@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "roomba-v4"
+version = "0.1.0"
+description = "Local control of iRobot Roomba v4 protocol robots (Combo Max) without cloud dependencies"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.15", "pre-commit>=3.0"]
+
+[project.scripts]
+roomba-v4 = "roomba_v4.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/kilianp07/roomba-v4"
+
+[tool.setuptools.packages.find]
+where = ["src"]
