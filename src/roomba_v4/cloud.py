@@ -9,6 +9,7 @@ Auth flow:
   3. iRobot v2/login with Gigya signature → robots dict (with passwords)
 """
 
+import base64
 import json
 import urllib.request
 import urllib.parse
@@ -51,7 +52,7 @@ def _get_json(url: str) -> dict:
 def discover_endpoints() -> dict:
     """Fetch iRobot discovery endpoint to get dynamic Gigya key and API base.
 
-    Returns dict with keys: gigya_api_key, gigya_base, http_base.
+    Returns dict with keys: gigya_api_key, gigya_base, http_base, mqtt_endpoint.
     """
     try:
         data = _get_json(DISCOVERY_URL)
@@ -67,12 +68,17 @@ def discover_endpoints() -> dict:
     if not datacenter:
         raise CloudError("No Gigya datacenter in discovery response")
 
-    # Find httpBase from deployments
+    # Find httpBase and mqtt from deployments
     deployments = data.get("deployments", {})
     http_base = None
+    mqtt_endpoint = None
     for ver in sorted(deployments.keys(), reverse=True):
-        http_base = deployments[ver].get("httpBase")
-        if http_base:
+        dep = deployments[ver]
+        if not http_base:
+            http_base = dep.get("httpBase")
+        if not mqtt_endpoint:
+            mqtt_endpoint = dep.get("mqtt")
+        if http_base and mqtt_endpoint:
             break
 
     if not http_base:
@@ -82,6 +88,7 @@ def discover_endpoints() -> dict:
         "gigya_api_key": api_key,
         "gigya_base": f"https://accounts.{datacenter}",
         "http_base": http_base,
+        "mqtt_endpoint": mqtt_endpoint,
     }
 
 
@@ -171,10 +178,45 @@ def get_robots(login_response: dict) -> list[dict]:
     return robots
 
 
-def fetch_robot_credentials(email: str, password: str) -> list[dict]:
-    """Full flow: discover → gigya login → irobot login → extract robots.
+def get_iot_credentials(login_response: dict, mqtt_endpoint: str | None) -> dict:
+    """Extract IoT MQTT credentials from iRobot login response.
 
-    Returns list of dicts with keys: blid, password, name, sku, softwareVer.
+    Returns dict with keys: iot_token, iot_clientid, iot_signature,
+    iot_authorizer_name, token_expires_ts, cognito_credentials, mqtt_endpoint.
+    """
+    iot_token = login_response.get("iot_token", "")
+    token_expires_ts = None
+    if iot_token:
+        try:
+            decoded = base64.b64decode(iot_token).decode()
+            parsed = json.loads(decoded)
+            token_expires_ts = parsed.get("expires_ts")
+        except Exception:
+            pass
+
+    creds = login_response.get("credentials", {})
+    cognito_credentials = {
+        "AccessKeyId": creds.get("AccessKeyId", ""),
+        "SecretKey": creds.get("SecretKey", ""),
+        "SessionToken": creds.get("SessionToken", ""),
+        "Expiration": creds.get("Expiration", ""),
+    }
+
+    return {
+        "iot_token": iot_token,
+        "iot_clientid": login_response.get("iot_clientid", ""),
+        "iot_signature": login_response.get("iot_signature", ""),
+        "iot_authorizer_name": login_response.get("iot_authorizer_name", ""),
+        "token_expires_ts": token_expires_ts,
+        "cognito_credentials": cognito_credentials,
+        "mqtt_endpoint": mqtt_endpoint,
+    }
+
+
+def fetch_robot_credentials(email: str, password: str) -> tuple[list[dict], dict]:
+    """Full flow: discover → gigya login → irobot login → extract robots + IoT creds.
+
+    Returns (robots, iot_credentials) tuple.
     """
     endpoints = discover_endpoints()
     gigya_data = login_gigya(
@@ -184,4 +226,6 @@ def fetch_robot_credentials(email: str, password: str) -> list[dict]:
         endpoints["gigya_base"],
     )
     login_resp = login_irobot(gigya_data, endpoints["http_base"])
-    return get_robots(login_resp)
+    robots = get_robots(login_resp)
+    iot_creds = get_iot_credentials(login_resp, endpoints.get("mqtt_endpoint"))
+    return robots, iot_creds

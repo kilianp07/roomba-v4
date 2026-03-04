@@ -1,5 +1,6 @@
 """Tests for roomba_v4.cloud."""
 
+import base64
 import json
 from unittest.mock import MagicMock, patch
 
@@ -9,6 +10,7 @@ from roomba_v4.cloud import (
     CloudError,
     discover_endpoints,
     fetch_robot_credentials,
+    get_iot_credentials,
     get_robots,
     login_gigya,
     login_irobot,
@@ -30,7 +32,10 @@ DISCOVERY_RESPONSE = {
         "datacenter_domain": "us1.gigya.com",
     },
     "deployments": {
-        "v011": {"httpBase": "https://unauth2.prod.iot.irobotapi.com"},
+        "v011": {
+            "httpBase": "https://unauth2.prod.iot.irobotapi.com",
+            "mqtt": "a]]]mqtt-endpoint.iot.us-east-1.amazonaws.com",
+        },
     },
 }
 
@@ -43,6 +48,9 @@ class TestDiscoverEndpoints:
         assert result["gigya_api_key"] == "3_test_api_key"
         assert result["gigya_base"] == "https://accounts.us1.gigya.com"
         assert result["http_base"] == "https://unauth2.prod.iot.irobotapi.com"
+        assert (
+            result["mqtt_endpoint"] == "a]]]mqtt-endpoint.iot.us-east-1.amazonaws.com"
+        )
 
     @patch("roomba_v4.cloud.urllib.request.urlopen")
     def test_discover_missing_api_key(self, mock_urlopen):
@@ -164,26 +172,33 @@ class TestGetRobots:
 
 
 class TestFetchRobotCredentials:
+    @patch("roomba_v4.cloud.get_iot_credentials")
     @patch("roomba_v4.cloud.get_robots")
     @patch("roomba_v4.cloud.login_irobot")
     @patch("roomba_v4.cloud.login_gigya")
     @patch("roomba_v4.cloud.discover_endpoints")
-    def test_full_flow(self, mock_discover, mock_gigya, mock_irobot, mock_robots):
+    def test_full_flow(
+        self, mock_discover, mock_gigya, mock_irobot, mock_robots, mock_iot
+    ):
         mock_discover.return_value = {
             "gigya_api_key": "key",
             "gigya_base": "https://accounts.us1.gigya.com",
             "http_base": "https://api.example.com",
+            "mqtt_endpoint": "mqtt.example.com",
         }
         mock_gigya.return_value = {
             "uid": "u",
             "uid_signature": "s",
             "signature_timestamp": "t",
         }
-        mock_irobot.return_value = {"robots": {"AABB": {"password": ":1:0:x"}}}
+        login_resp = {"robots": {"AABB": {"password": ":1:0:x"}}}
+        mock_irobot.return_value = login_resp
         mock_robots.return_value = [{"blid": "AABB", "password": ":1:0:x"}]
+        mock_iot.return_value = {"mqtt_endpoint": "mqtt.example.com"}
 
-        robots = fetch_robot_credentials("user@example.com", "pass")
+        robots, iot_creds = fetch_robot_credentials("user@example.com", "pass")
         assert len(robots) == 1
+        assert iot_creds["mqtt_endpoint"] == "mqtt.example.com"
         mock_discover.assert_called_once()
         mock_gigya.assert_called_once_with(
             "user@example.com",
@@ -195,3 +210,55 @@ class TestFetchRobotCredentials:
             {"uid": "u", "uid_signature": "s", "signature_timestamp": "t"},
             "https://api.example.com",
         )
+        mock_iot.assert_called_once_with(login_resp, "mqtt.example.com")
+
+
+class TestGetIotCredentials:
+    def test_extracts_all_fields(self):
+        token_payload = json.dumps({"expires_ts": 1700000000}).encode()
+        iot_token = base64.b64encode(token_payload).decode()
+        login_resp = {
+            "iot_token": iot_token,
+            "iot_clientid": "client-123",
+            "iot_signature": "sig-abc",
+            "iot_authorizer_name": "auth-name",
+            "credentials": {
+                "AccessKeyId": "AKIA...",
+                "SecretKey": "secret",
+                "SessionToken": "token",
+                "Expiration": "2024-01-01T00:00:00Z",
+            },
+        }
+        result = get_iot_credentials(login_resp, "mqtt.example.com")
+        assert result["iot_token"] == iot_token
+        assert result["iot_clientid"] == "client-123"
+        assert result["iot_signature"] == "sig-abc"
+        assert result["iot_authorizer_name"] == "auth-name"
+        assert result["token_expires_ts"] == 1700000000
+        assert result["cognito_credentials"]["AccessKeyId"] == "AKIA..."
+        assert result["cognito_credentials"]["SecretKey"] == "secret"
+        assert result["cognito_credentials"]["SessionToken"] == "token"
+        assert result["mqtt_endpoint"] == "mqtt.example.com"
+
+    def test_b64_decode_extracts_expires_ts(self):
+        token_payload = json.dumps({"expires_ts": 9999999999, "other": "data"}).encode()
+        iot_token = base64.b64encode(token_payload).decode()
+        result = get_iot_credentials({"iot_token": iot_token}, None)
+        assert result["token_expires_ts"] == 9999999999
+
+    def test_missing_iot_token(self):
+        result = get_iot_credentials({}, "mqtt.example.com")
+        assert result["iot_token"] == ""
+        assert result["token_expires_ts"] is None
+        assert result["mqtt_endpoint"] == "mqtt.example.com"
+
+    def test_invalid_b64_token(self):
+        result = get_iot_credentials({"iot_token": "not-valid-b64!!!"}, None)
+        assert result["token_expires_ts"] is None
+
+    def test_missing_credentials(self):
+        result = get_iot_credentials({}, None)
+        assert result["cognito_credentials"]["AccessKeyId"] == ""
+        assert result["cognito_credentials"]["SecretKey"] == ""
+        assert result["cognito_credentials"]["SessionToken"] == ""
+        assert result["cognito_credentials"]["Expiration"] == ""
