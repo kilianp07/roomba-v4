@@ -4,6 +4,7 @@ Usage:
     roomba-v4 discover [--target IP] [--timeout SEC]
     roomba-v4 getblid --target IP [--timeout SEC]
     roomba-v4 getpassword
+    roomba-v4 cloud-mqtt [--duration SEC]
     roomba-v4 start [--mop] [--wetness 1|2|3] [--ip IP] [--blid BLID] [--password PASS]
     roomba-v4 stop   [--ip IP] [--blid BLID] [--password PASS]
     roomba-v4 dock   [--ip IP] [--blid BLID] [--password PASS]
@@ -15,6 +16,7 @@ import argparse
 import getpass
 import os
 import sys
+import time
 
 DEFAULT_IP = os.environ.get("ROOMBA_IP", "")
 DEFAULT_BLID = os.environ.get("ROOMBA_BLID", "")
@@ -128,6 +130,62 @@ def cmd_getpassword(args):
         print(f"  IoT token expires:   {iot_creds['token_expires_ts']}")
 
 
+def cmd_cloud_mqtt(args):
+    from .cloud import CloudError, fetch_robot_credentials
+    from .cloud_mqtt import CloudMQTT
+
+    email = os.environ.get("IROBOT_EMAIL", "").strip()
+    password = os.environ.get("IROBOT_PASSWORD", "").strip()
+
+    if not email or not password:
+        print("Login with your iRobot Home app credentials.\n")
+        if not email:
+            email = input("iRobot email: ").strip()
+        if not password:
+            password = getpass.getpass("iRobot password: ")
+
+    if not email or not password:
+        print("Error: email and password are required.", file=sys.stderr)
+        sys.exit(1)
+
+    print("\nFetching robot credentials...")
+    try:
+        robots, iot_creds = fetch_robot_credentials(email, password)
+    except CloudError as e:
+        print(f"\nError: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not iot_creds.get("mqtt_endpoint"):
+        print("Error: no MQTT endpoint returned by the cloud API.", file=sys.stderr)
+        sys.exit(1)
+
+    # Per-robot shadow topics (multi-level wildcard # is denied by IoT policy)
+    topics = []
+    for r in robots:
+        b = r["blid"]
+        topics.append(f"$aws/things/{b}/shadow/get/accepted")
+        topics.append(f"$aws/things/{b}/shadow/update/accepted")
+        topics.append(f"$aws/things/{b}/shadow/update/delta")
+
+    print(f"Connecting to {iot_creds['mqtt_endpoint']}...")
+    client = CloudMQTT(iot_creds)
+    client.connect(debug=getattr(args, "debug", False))
+    client.subscribe(topics)
+
+    # Wait for subscriptions, then request current shadows
+    time.sleep(2)
+    for r in robots:
+        client.publish(f"$aws/things/{r['blid']}/shadow/get")
+
+    print(f"Listening for {args.duration}s (Ctrl+C to stop)...\n")
+    try:
+        time.sleep(args.duration)
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+    finally:
+        client.disconnect()
+
+
 def cmd_robot(args):
     from .robot import Robot
 
@@ -187,6 +245,20 @@ def main():
     # getpassword
     sub.add_parser("getpassword", help="Fetch robot password from iRobot cloud")
 
+    # cloud-mqtt
+    p_cloud_mqtt = sub.add_parser(
+        "cloud-mqtt", help="Connect to cloud MQTT and log messages"
+    )
+    p_cloud_mqtt.add_argument(
+        "--duration",
+        type=int,
+        default=60,
+        help="Listen duration in seconds (default: 60)",
+    )
+    p_cloud_mqtt.add_argument(
+        "--debug", action="store_true", help="Enable MQTT debug logging"
+    )
+
     # Robot control commands
     for cmd in ("start", "stop", "dock", "pause", "resume"):
         p = sub.add_parser(cmd, help=f"{cmd.capitalize()} the robot")
@@ -211,6 +283,8 @@ def main():
         cmd_getblid(args)
     elif args.command == "getpassword":
         cmd_getpassword(args)
+    elif args.command == "cloud-mqtt":
+        cmd_cloud_mqtt(args)
     else:
         cmd_robot(args)
 
