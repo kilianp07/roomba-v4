@@ -102,7 +102,7 @@ def cmd_getpassword(args):
 
     print("\nFetching robot credentials...")
     try:
-        robots = fetch_robot_credentials(email, password)
+        robots, iot_creds = fetch_robot_credentials(email, password)
     except CloudError as e:
         print(f"\nError: {e}", file=sys.stderr)
         sys.exit(1)
@@ -121,6 +121,11 @@ def cmd_getpassword(args):
     first = robots[0]
     print(f'  export ROOMBA_BLID="{first["blid"]}"')
     print(f'  export ROOMBA_PASSWORD="{first["password"]}"')
+
+    if iot_creds.get("mqtt_endpoint"):
+        print(f"\n  Cloud MQTT endpoint: {iot_creds['mqtt_endpoint']}")
+    if iot_creds.get("token_expires_ts"):
+        print(f"  IoT token expires:   {iot_creds['token_expires_ts']}")
 
 
 def cmd_robot(args):
