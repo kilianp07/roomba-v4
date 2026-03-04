@@ -73,6 +73,21 @@ roomba-v4 getpassword
 
 Prompts for your iRobot Home app credentials (email + password), then fetches your robot's MQTT password from the iRobot cloud API. This calls the same API the official app uses — it accesses your own account data, nothing more.
 
+### Cloud MQTT — monitor robot state from the cloud
+
+```bash
+# Set cloud credentials
+export IROBOT_EMAIL="you@example.com"
+export IROBOT_PASSWORD="your-irobot-password"
+
+# Listen for shadow updates (default: 60s)
+roomba-v4 cloud-mqtt
+roomba-v4 cloud-mqtt --duration 120
+roomba-v4 cloud-mqtt --debug   # verbose MQTT logging
+```
+
+Connects to the iRobot AWS IoT Core MQTT broker via WebSocket, requests device shadows, and logs all messages. Uses `IROBOT_EMAIL` / `IROBOT_PASSWORD` environment variables, or prompts interactively if not set.
+
 ### Control your robot
 
 ```bash
@@ -104,6 +119,8 @@ roomba-v4 start --ip 192.168.1.100 --blid XXXX --password ":1:..."
 | `ROOMBA_IP` | Robot IP address |
 | `ROOMBA_BLID` | Robot BLID (from discovery or hostname) |
 | `ROOMBA_PASSWORD` | Robot MQTT password (use `roomba-v4 getpassword` to retrieve it) |
+| `IROBOT_EMAIL` | iRobot Home app email (for `cloud-mqtt` / `getpassword`) |
+| `IROBOT_PASSWORD` | iRobot Home app password (for `cloud-mqtt` / `getpassword`) |
 
 ## Architecture
 
@@ -118,6 +135,7 @@ roomba-v4 start --ip 192.168.1.100 --blid XXXX --password ":1:..."
 - **`robot.py`**: High-level Python API wrapping the bridge. Sends JSON commands on the `cmd` MQTT topic.
 - **`discovery.py`**: UDP discovery on port 5678. Sends to both subnet broadcast and `255.255.255.255`, or to a specific target IP via `--target`.
 - **`cloud.py`**: Fetches robot credentials from the iRobot cloud API (Gigya auth + iRobot login).
+- **`cloud_mqtt.py`**: Cloud MQTT client — connects to AWS IoT Core via WebSocket using the custom authorizer credentials from `cloud.py`.
 - **`__main__.py`**: CLI entry point.
 
 ## Protocol Notes
