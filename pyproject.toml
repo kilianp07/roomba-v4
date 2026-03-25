@@ -9,7 +9,7 @@ description = "Local control of iRobot Roomba v4 protocol robots (Combo Max) wit
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
-dependencies = ["paho-mqtt>=2.0"]
+dependencies = ["paho-mqtt>=2.0", "botocore>=1.30"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ruff>=0.15", "pre-commit>=3.0"]

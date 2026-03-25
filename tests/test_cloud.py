@@ -32,9 +32,17 @@ DISCOVERY_RESPONSE = {
         "datacenter_domain": "us1.gigya.com",
     },
     "deployments": {
+        "v005": {
+            "httpBase": "https://unauth1.prod.iot.irobotapi.com",
+            "httpBaseAuth": "https://auth1.prod.iot.irobotapi.com",
+            "mqtt": "mqtt-endpoint.iot.us-east-1.amazonaws.com",
+            "svcDeplId": "v005",
+        },
         "v011": {
             "httpBase": "https://unauth2.prod.iot.irobotapi.com",
-            "mqtt": "a]]]mqtt-endpoint.iot.us-east-1.amazonaws.com",
+            "httpBaseAuth": "https://auth2.prod.iot.irobotapi.com",
+            "mqtt": "mqtt-endpoint.iot.us-east-1.amazonaws.com",
+            "svcDeplId": "v011",
         },
     },
 }
@@ -48,8 +56,12 @@ class TestDiscoverEndpoints:
         assert result["gigya_api_key"] == "3_test_api_key"
         assert result["gigya_base"] == "https://accounts.us1.gigya.com"
         assert result["http_base"] == "https://unauth2.prod.iot.irobotapi.com"
+        assert result["mqtt_endpoint"] == "mqtt-endpoint.iot.us-east-1.amazonaws.com"
+        assert "v005" in result["deployments"]
+        assert "v011" in result["deployments"]
         assert (
-            result["mqtt_endpoint"] == "a]]]mqtt-endpoint.iot.us-east-1.amazonaws.com"
+            result["deployments"]["v005"]["httpBaseAuth"]
+            == "https://auth1.prod.iot.irobotapi.com"
         )
 
     @patch("roomba_v4.cloud.urllib.request.urlopen")
@@ -147,6 +159,8 @@ class TestGetRobots:
         assert robots[0]["blid"] == "AABBCCDD"
         assert robots[0]["password"] == ":1:9999:secret"
         assert robots[0]["name"] == "My Roomba"
+        assert robots[0]["svcDeplId"] == ""
+        assert robots[0]["http_base_auth"] == ""
 
     def test_robots_list_format(self):
         login_resp = {
@@ -170,6 +184,50 @@ class TestGetRobots:
         robots = get_robots({})
         assert robots == []
 
+    def test_robots_with_deployments_resolves_http_base_auth(self):
+        deployments = {
+            "v005": {"httpBaseAuth": "https://auth1.example.com"},
+            "v011": {"httpBaseAuth": "https://auth2.example.com"},
+        }
+        login_resp = {
+            "robots": {
+                "ROBOT_A": {
+                    "password": "pw1",
+                    "name": "Robot A",
+                    "sku": "X185040",
+                    "softwareVer": "9.3.6",
+                    "svcDeplId": "v005",
+                },
+                "ROBOT_B": {
+                    "password": "pw2",
+                    "name": "Robot B",
+                    "sku": "j557840",
+                    "softwareVer": "24.29.6",
+                    "svcDeplId": "v011",
+                },
+            }
+        }
+        robots = get_robots(login_resp, deployments)
+        by_blid = {r["blid"]: r for r in robots}
+        assert by_blid["ROBOT_A"]["svcDeplId"] == "v005"
+        assert by_blid["ROBOT_A"]["http_base_auth"] == "https://auth1.example.com"
+        assert by_blid["ROBOT_B"]["svcDeplId"] == "v011"
+        assert by_blid["ROBOT_B"]["http_base_auth"] == "https://auth2.example.com"
+
+    def test_robots_unknown_svc_depl_id(self):
+        deployments = {"v005": {"httpBaseAuth": "https://auth1.example.com"}}
+        login_resp = {
+            "robots": {
+                "ROBOT_X": {
+                    "password": "pw",
+                    "svcDeplId": "v099",
+                }
+            }
+        }
+        robots = get_robots(login_resp, deployments)
+        assert robots[0]["svcDeplId"] == "v099"
+        assert robots[0]["http_base_auth"] == ""
+
 
 class TestFetchRobotCredentials:
     @patch("roomba_v4.cloud.get_iot_credentials")
@@ -180,11 +238,13 @@ class TestFetchRobotCredentials:
     def test_full_flow(
         self, mock_discover, mock_gigya, mock_irobot, mock_robots, mock_iot
     ):
+        deployments = {"v005": {"httpBaseAuth": "https://auth1.example.com"}}
         mock_discover.return_value = {
             "gigya_api_key": "key",
             "gigya_base": "https://accounts.us1.gigya.com",
             "http_base": "https://api.example.com",
             "mqtt_endpoint": "mqtt.example.com",
+            "deployments": deployments,
         }
         mock_gigya.return_value = {
             "uid": "u",
@@ -210,6 +270,7 @@ class TestFetchRobotCredentials:
             {"uid": "u", "uid_signature": "s", "signature_timestamp": "t"},
             "https://api.example.com",
         )
+        mock_robots.assert_called_once_with(login_resp, deployments)
         mock_iot.assert_called_once_with(login_resp, "mqtt.example.com")
 
 
@@ -262,3 +323,30 @@ class TestGetIotCredentials:
         assert result["cognito_credentials"]["SecretKey"] == ""
         assert result["cognito_credentials"]["SessionToken"] == ""
         assert result["cognito_credentials"]["Expiration"] == ""
+
+    def test_connection_tokens_format(self):
+        token_payload = json.dumps({"expires_ts": 1800000000}).encode()
+        iot_token = base64.b64encode(token_payload).decode()
+        login_resp = {
+            "connection_tokens": [
+                {
+                    "client_id": "app-client-001",
+                    "iot_token": iot_token,
+                    "iot_signature": "sig-from-ct",
+                    "iot_authorizer_name": "auth-from-ct",
+                    "devices": ["BLID1", "BLID2"],
+                }
+            ],
+            "credentials": {
+                "AccessKeyId": "AK",
+                "SecretKey": "SK",
+                "SessionToken": "ST",
+                "Expiration": "2026-01-01T00:00:00Z",
+            },
+        }
+        result = get_iot_credentials(login_resp, "mqtt.example.com")
+        assert result["iot_token"] == iot_token
+        assert result["iot_clientid"] == "app-client-001"
+        assert result["iot_signature"] == "sig-from-ct"
+        assert result["iot_authorizer_name"] == "auth-from-ct"
+        assert result["token_expires_ts"] == 1800000000
